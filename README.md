@@ -438,7 +438,7 @@
 
 ##### 2.底层原理
 
-- [x] goroutine(协程)和线程是什么关系，goroutine是如何调度的？
+- [ ] goroutine(协程)和线程是什么关系，goroutine是如何调度的？
 
   
 
@@ -460,15 +460,15 @@
         2. 而线程的调度只有拥有最高权限的内核空间才可以完成，所以线程的切换涉及到用户空间和内核空间的切换，除了和协程相同基本的 CPU 上下文，还有线程私有的栈和寄存器等。
         3. 扩展问题， 可能会涉及到 操作系统中的 什么是用户态和内核态，还有就是系统调度？
            1.  用户态：只能受限的访问内存，且不允许访问外围设备，占用cpu的能力被剥夺，cpu资源可以被其他程序获取。
-           2. 内核态：cpu可以访问内存的所有数据，包括外围设备，例如硬盘，网卡，cpu也可以将自己从一个程序切换到另一个程序。
-           3. 系统调度：这是用户态进程主动要求切换到内核态的一种方式。
-              1. 协程切换只涉及基本的CPU上下文切换，所谓的 CPU 上下文，就是一堆寄存器，里面保存了 CPU运行任务所需要的信息：从哪里开始运行
-                 栈顶的位置，当前栈帧在哪，以及其它的CPU的中间状态或者结果。goroutine 切换就是把当前的 CPU 寄存器状态保存起来，
-                 然后将需要切换进来的协程的 CPU 寄存器状态加载的 CPU 寄存器上就 ok 了；
-              2. 而线程的调度只有拥有最高权限的内核空间才可以完成，所以线程的切换涉及到用户空间和内核空间的切换，除了和协程相同基本的 CPU 上下文，还有线程私有的栈和寄存器等。
-                 扩展问题， 可能会涉及到 操作系统中的 什么是用户态和内核态，还有就是系统调度？ 
-                 用户态：只能受限的访问内存，且不允许访问外围设备，占用cpu的能力被剥夺，cpu资源可以被其他程序获取。
-                 内核态：cpu可以访问内存的所有数据，包括外围设备，例如硬盘，网卡，cpu也可以将自己从一个程序切换到另一个程序。参考链接 https://www.cnblogs.com/gtblog/p/12155109.html https://www.zhihu.com/question/308641794
+           2.  内核态：cpu可以访问内存的所有数据，包括外围设备，例如硬盘，网卡，cpu也可以将自己从一个程序切换到另一个程序。
+           3.  系统调度：这是用户态进程主动要求切换到内核态的一种方式。
+               1. 协程切换只涉及基本的CPU上下文切换，所谓的 CPU 上下文，就是一堆寄存器，里面保存了 CPU运行任务所需要的信息：从哪里开始运行
+                  栈顶的位置，当前栈帧在哪，以及其它的CPU的中间状态或者结果。goroutine 切换就是把当前的 CPU 寄存器状态保存起来，
+                  然后将需要切换进来的协程的 CPU 寄存器状态加载的 CPU 寄存器上就 ok 了；
+               2. 而线程的调度只有拥有最高权限的内核空间才可以完成，所以线程的切换涉及到用户空间和内核空间的切换，除了和协程相同基本的 CPU 上下文，还有线程私有的栈和寄存器等。
+                  扩展问题， 可能会涉及到 操作系统中的 什么是用户态和内核态，还有就是系统调度？ 
+                  用户态：只能受限的访问内存，且不允许访问外围设备，占用cpu的能力被剥夺，cpu资源可以被其他程序获取。
+                  内核态：cpu可以访问内存的所有数据，包括外围设备，例如硬盘，网卡，cpu也可以将自己从一个程序切换到另一个程序。参考链接 https://www.cnblogs.com/gtblog/p/12155109.html https://www.zhihu.com/question/308641794
 
 - [ ] go gmp 调度模型实现。从早期1.x版本演进到1.14，做了哪些大改变? time.sleep阻塞时,网络请求阻塞时,调用系统方法时,GMP怎么流转的？
 
@@ -488,39 +488,147 @@
 
 - [ ] go 读写锁和互斥锁的区别和使用场景
 
+  1. sync.RWMutex ：由Mutex + atomic 实现, sync/rwmutex.go 
+
+     特点：抢占式读写锁，写锁之后，读锁加不上；
+
+  2. 写写时需要引入Mutex 
+     注意点：知道读写锁 纯读或者 读多写少的情况下，性能差别不是太大，大概几倍，在一些场景下，可以考虑使用Mutex代替RWMutex, 毕竟RWMutex 编码还是比较复杂的。相信我多数面试官没有压测过。
+
 - [ ] chan 底层实现 、 make(chan struct {}) 和 make(chan bool) 在chan的源码实现上有什么区别，chan，什么时候会panic
+
+  1.  循环队列+mutex（注意下 no buffer 的在读取时的优化，其他大概回答下 ）；make(chan, 1) 和make(chan) 的区别 。 顺便可以说下channel 的优雅关闭 
+     注意点：在有等待的receiver 时，发送方会越过channel buffer 直接将数据copy 到receiver 。
+     源码解析 参考 https://github.com/cch123/golang-notes/blob/master/channel.md
+  2. 第二个问题: 大概是问struct{} 在go内部做了优化，不占用内存；其他类型(int, bool, ptr)都需要64位(bool 待定)。可以不具体回答字节数
+  3. chan，什么时候会panic
+     write to close(chan)
 
 - [ ] 有缓冲channel和无缓冲channel区别？
 
 - [ ] map 底层实现&sync.Map的区别
 
-- [ ] golang 的map 插入顺序和输出顺序是一样的吗？随机输出
+   	1. 原理参考：https://tonybai.com/2020/11/10/understand-sync-map-inside-through-examples/
+       源码解析: https://github.com/cch123/golang-notes/blob/master/sync.md
+
+- [ ] golang 的map 插入顺序和输出顺序是一样的吗？
+
+  随机输出， 原因 考虑map 扩容时，原来同一个bucket 的key，扩容后，有可能落到其他位置上。
 
 - [ ] go内存分配
 
 - [ ] go 内存分配，大小对象内存分配区别？多级分配的优点是什么？
 
+- [ ] go内存泄漏
+
+   	1. 内存泄漏场景： https://gfw.go101.org/article/memory-leaking.html 
+       有兴趣可以看下这个： https://xargin.com/logic-of-slice-memory-leak/
+
 - [ ] 内存对齐，说说为什么要内存对齐，原理原因
+
+  1. 原因：比如 intel 32位cpu，每个总线周期都是从偶地址开始读取32位的内存数据，如果数据存放地址不是从偶数开始，则可能出现需要两个总线周期才能读取到想要的数据，因此需要在内存中存放数据时进行对齐。参考https://www.zhihu.com/question/27862634
 
 - [ ] go gc的实现与触发机制
 
+   	1. 实现： https://github.com/yifhao/share/blob/master/gopher%20meetup-%E6%B7%B1%E5%85%A5%E6%B5%85%E5%87%BAGolang%20Runtime-yifhao-%E5%AE%8C%E6%95%B4%E7%89%88.pdf
+   	2. 触发：
+        	1. 主动触发 通过调用 runtime.GC 来触发 GC，此调用阻塞式地等待当前 GC 运行完毕；
+        	2. 被动触发，分为两种方式：
+            使用系统监控，当超过两分钟没有产生任何 GC 时，强制触发 GC。
+            使用步调（Pacing）算法，其核心思想是控制内存增长的比例。
+
 - [ ] interface 底层实现，怎么判空？
 
-- [ ] slice 和 array的区别？
+  
+
+  1. 底层实现
+
+     1. 接口有两种底层结构,分别是：`iface` 和 `eface` ，区别在于 `iface` 描述的接口包含方法，而 `eface` 则是不包含任何方法的空接口：`interface{}`。
+     2.  `iface` 内部维护两个指针，`tab` 指向一个 `itab` 实体， 它表示接口的类型以及赋给这个接口的实体类型。`data` 则指向接口具体的值，一般而言是一个指向堆内存的指针。`_type` 字段描述了实体的类型，包括内存对齐方式，大小等；`inter` 字段则描述了接口的类型。`fun` 字段放置和接口方法对应的具体数据类型的方法地址，实现接口调用方法的动态分派，一般在每次给接口赋值发生转换时会更新此表，或者直接拿缓存的 itab
+     3. ![](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210306153606436.png)
+     4. ![](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210306153634432.png)
+     5. `interfacetype` 类型，它描述的是接口的类型，它包装了 `_type` 类型，`_type` 实际上是描述 Go 语言中各种数据类型的结构体。我们注意到，这里还包含一个 `mhdr` 字段，表示接口所定义的函数列表， `pkgpath` 记录定义了接口的包名
+     6. ![](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210306153933648.png)
+     7. 看下 `_type` 结构体，Go 语言各种数据类型都是在 `_type` 字段的基础上，增加一些额外的字段来进行管理的
+     8. ![](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210306154445739.png)
+     9. ![](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210306154550415.png)
+
+  2. 接口判空
+
+     **接口值的零值是指`动态类型`和`动态值`都为 `nil`。**当仅且当这两部分的值都为 `nil` 的情况下，这个接口值就才会被认为 `接口值 == nil`
+
+  3. 接口小技巧
+
+     1. *编译器自动检测类型是否实现接口* , `` var _ io.Writer = (*myWriter)(nil) `` ,赋值语句会发生隐式地类型转换，在转换的过程中，编译器会检测等号右边的类型是否实现了等号左边接口所规定的函数。
 
 - [ ] slice的底层实现
 
+  
+
+  1. slice 是一个结构体，包含三个字段：长度、容量、底层数组。
+
+  2. 底层数据结构是数组，slice 是对数组的封装，它描述一个数组的片段,可以通过下标来访问单个元素。
+
+  3. ![](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210306160532172.png)
+
+  4. slice在进行append的时候,如果容量不够,会发生扩容,通常情况下,将新的容量将扩大为原始容量的2倍。如果原先的容量超过1024,则按1.25倍来进行扩容。 slice 是一个结构体，包含三个字段：长度、容量、底层数组。底层数据结构是数组，slice 是对数组的封装，它描述一个数组的片段,可以通过下标来访问单个元素。
+
+  5. slice在进行append的时候,如果容量不够,会发生扩容,通常情况下,将新的容量将扩大为原始容量的2倍。如果原先的容量超过1024,则按1.25倍来进行扩容。
+
+  6. **小TIPS**：**在对slice进行扩容的时候,由于做了内存对齐的操作,实际容量是要大于1.25倍的**
+
+     
+
+- [ ] slice 和 array的区别？
+
+  
+
+  1. 相同点:
+
+     1. 都可以通过下标访问
+
+  2. 不同点:
+
+     1. 数组元素个数固定不能修改,slice元素个数不固定
+
+     2. 切片可以扩容
+
+     3. 初始化方法不一样，切片使用make创建
+
+        
+
 - [ ] []byte{} string 的区别
+
+  
+
+  1. string底层结构为指向byte数组的指针+len
+  2. byte切片可以改变元素,而string由于底层是数组,无法修改
+  3. 对string的修改操作需要重新开辟内存,旧数组会被GC回收,有性能问题
+
+  
 
 - [ ] new和make的区别(高频)
 
+  1. new返回的是指向type的指针,指向分配类型的内存地址;make直接返回的是type类型值
+  2. new只有一个type参数，type可以是任意类型数据; make可以有多个参数，但是只能是slice，map，或者chan
+  3. new返回的指针指向的地址值为类型的0值;make返回的是非零值的实例
+
 - [ ] reflect 的使用
 
+  
+
+- [ ] map 底层实现sync.Map的区别
+
+  1. Map底层实现
+     1. 
+  2. sync.Map的底层实现
+     1. 
+  3. 区别
+     1. 
+
 - [ ] Context 的使用，用法，有无父子关系？怎么去做并发控制？底层实现（高频）
 
-- [ ] map 底层实现&sync.Map的区别
-
-- [ ] Context 的使用，用法，有无父子关系？怎么去做并发控制？底层实现（高频）
+  ​	
 
 - [ ] context 的使用，context是否并发安全？
 
