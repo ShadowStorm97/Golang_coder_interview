@@ -265,12 +265,331 @@
 
 ##### 2.使用场景
 
-- [ ] 分布式锁
-- [ ] 缓存雪崩、缓存击穿、缓存穿透
-- [ ] reids的大key、热key的处理
-- [ ] redis大key会有什么问题，如何解决
-- [ ] redis超时是什么引起的
-- [ ] redis缓存穿透,缓存雪崩
+- [x] 分布式锁
+
+  ##### 实现:
+
+       单节点：`SET resource_name my_random_value NX PX 30000`
+
+  >      该命令仅当 Key 不存在时（NX保证）set 值，并且设置过期时间 3000ms （PX保证），值 my_random_value 必须是所有 client 和所有锁请求发生期间唯一的
+
+  释放锁：
+
+     
+
+  ```lua
+  if redis.call("get",KEYS[1]) == ARGV[1] then
+      return redis.call("del",KEYS[1])
+  else
+      return 0
+  end
+  ```
+
+  
+
+  > 上述实现可以避免释放另一个client创建的锁，如果只有 del 命令的话，那么如果 client1 拿到 lock1 之后因为某些操作阻塞了很长时间，此时 Redis 端 lock1 已经过期了并且已经被重新分配给了 client2，那么 client1 此时再去释放这把锁就会造成 client2 原本获取到的锁被 client1 无故释放了，但现在为每个 client 分配一个 unique 的 string 值可以避免这个问题。至于如何去生成这个 unique string，方法很多随意选择一种就行了。
+
+  ##### Redlock算法描述
+
+  1. 获取当前时间（毫秒数)；
+
+  2. 尝试顺序地在 N 个实例上申请锁，当然需要使用相同的 key 和 random value，这里一个 client 需要合理设置与 master 节点沟通的 timeout 大小，避免长时间和一个 fail 了的节点浪费时间；
+
+  3. 当 client 在半数以上的实例成功申请到锁的时候，且它会计算申请锁消耗了多少时间，这部分消耗的时间采用获得锁的当下时间减去第一步获得的时间戳得到，如果锁的持续时长（lock validity time）比流逝的时间多的话，那么锁就真正获取到了；
+
+  4. 如果锁申请到了，那么锁真正的 lock validity time 应该是 origin（lock validity time） - 申请锁期间流逝的时间；
+
+  5. 如果 client 申请锁失败了，那么它就会在少部分申请成功锁的 master 节点上执行释放锁的操作，重置状态。
+
+     ##### 一些细节
+
+     ###### 非同步的时钟
+
+     > 由于 Redlock 算法中使用的各个实例没有同步的时钟，而且每个机器时钟可能也不准，简单的做法是对步骤 3 中的时间再减去一小段时间，从而缓解实际中各个机器间的时钟偏移（Clock Drift）。
+
+     ###### 失败重试
+
+     > 如果一个 client 申请锁失败了，那么它需要稍等一会在重试避免多个 client 同时申请锁的情况，最好的情况是一个 client 需要几乎同时向 N个 实例 发起锁申请。另外就是如果 client 申请锁失败了它需要尽快在它曾经申请到锁的 实例上执行 unlock 操作，便于其他 client 获得这把锁，避免这些锁过期造成的时间浪费，当然如果这时候网络分区使得 client 无法联系上这些 实例，那么这种浪费就是不得不付出的代价了。
+
+     ###### 性能、故障恢复和 fsync
+
+     > 假设 Redis 没有持久性，当一个客户端获得了 5 个实例中的 3 个锁，若 3 个锁所在的实例 Down 掉了，实例再次启动时，其他的客户端也可以再次获得锁。
+     >
+     > 这个问题会因为开启了 Redis 的持久化而改观，对于 AOF 持久化（区别与 RDB 的二进制持久化，是文本持久化）。默认采用的是每秒钟通过 `fsync` 落盘，这意味着会丢失一秒内的数据，如果需要更有安全保证的持久化，可以设置 `fsync=always`，但对应的会损失一部分性能。
+     >
+     > 更好的解决办法是在实例 Down 掉后延迟一个略长于锁合法时间的时间，这样就可以保证在实例启动起来时锁一定是过期的，从而无须以损失性能为代价而使用 `fsync=always` 的持久化。
+
+     ###### 锁续约
+
+     > Topic 中还提出了一个锁续约的概念，即客户端可初始时使用较小的锁有效时间，若时间超时仍操作仍未完成则通过 Lua 脚本来续期。
+     >
+     > 续约操作同获取锁的操作，如果能从多数的 Redis 实例中续约，则认为锁续约成功。
+     >
+     > 为了保证锁最终可以被释放，续约操作存在着一定的次数限制。
+
+     ###### 释放锁
+
+     > 放锁操作很简单，就是依次释放所有节点上的锁就行了
+
+  ##### Redlock 相关的讨论
+
+  > 针对 Redlock 的安全性问题，[Martin Kleppmann](http://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html) 与作者 [antirez](http://antirez.com/news/101) 存在着一些争论。
+
+  ###### Redlock 存在的问题
+
+  > Martin Kleppmann 提出使用分布式锁有两种目的：效率和正确性。
+
+  ###### 效率
+
+  > 效率相关的应用主要在使得同一个运算不会被同时计算两次，如果在这种情况下使用多个实例的分布式锁，不如使用单机分布式锁实现。由于误判仅会增加计算量而并不影响正确性，所以可以使用 Master Slave 的方式来增加可用性。
+
+  ###### 正确性
+
+  > 正确性相关的质疑在两个方面：
+  >
+  > 1. 由于无法保证锁在操作结束前一定不会结束，可能无法意识到自己的锁失效了，会导致同时有多个客户端持有锁并进行操作。
+  > 2. 基于时间的假设是不可靠的。
+  >
+  > 针对第二点，Martin 举了两个例子，以下均以 5 个节点 A ~ E 和 2 个客户端为例。
+  >
+  > 1. Redis 实例的时间无法保证不被修改，时间的修改可能导致锁的过期和异常：
+  >    1. 客户端 1 从节点 A、B、C 上获取锁，节点 D、E 由于网络原因不可达。
+  >    2. 节点 C 的时间跳变，锁过期了。
+  >    3. 客户端 2 从节点 C、D、E 上获取了锁，由于网络原因，节点 A、B 不可达。
+  >    4. 客户端 1、2 均认为它们拥有了锁。
+  > 2. 即使时间不会跳变，进程停等也可能影响正确性：
+  >    1. 客户端 1 从节点 A、B、C、D、E 上获取了锁。
+  >    2. 当请求快抵达客户端 1 时，客户端 GC 进行了 stop-the-world 操作。
+  >    3. 所有实例上的锁都过期了。
+  >    4. 客户端 2 从节点 A、B、C、D、E 上获取了锁。
+  >    5. 客户端 1 GC 结束了，同时获取了之前的请求信息。
+  >    6. 客户端 1、2 均认为它们拥有了锁。
+  >
+  > Martin 提出使用一种小 trick，使用类似的递增 ID 作为 fencing token 来保证每次锁内操作的正确性。在客户端每次请求中会检查 fencing token，如果依赖的是旧的 token，那么此操作会被拒绝并提示。
+  >
+  > Martin 认为 Redlock 是一个 [asynchronous model with unreliable failure detectors](http://courses.csail.mit.edu/6.852/08/papers/CT96-JACM.pdf)，依赖了不可靠的元素来保证其一致性，容错存在一个限度，超过限度则无法保证其正确性。GC 的 stop-the-world、网络的阻塞、换页等都会影响 Redlock 的效率或者正确性。
+  >
+  > Martin 的结论是：如果仅是效率需求，使用单节点算法；如果需求正确性，通过 zookeeper 来实现锁，或者使用 fencing token 来保证安全性。
+
+  ###### 解释和改进
+
+  > antirez 解释了目的是为了让人们找到单节点或者主备锁的替代品，从而在复杂度低以及高效的前提下使用锁。
+  >
+  > 针对正确性的第一点质疑，即锁内可能超时，antirez 认为分布式锁并不能提供强一致性的保证，只在没有别的办法控制共享资源时才会使用。
+  >
+  > 针对正确性的第二点质疑，对于第一个例子，提出 NTP 和手动修改时间导致的时间过大跃迁都可以被人工避免，其次也提出可以使用单调时间 API 来进行改进（不过好像至今没有更新）；对于第二个例子，实际出现次数非常少，另可以通过在获取到锁之后检查获取锁之前后的本地时间来确定锁是否过期。
+  >
+  > 对于 fencing token，若操作之间存在着线性关系，则可更改为递增 id；如果没有线性关系，则可以每次操作前检查 Key 对应的随机 Value 来避免过期操作。
+
+  非常建议看下https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html 这篇文章。
+
+  翻译版 https://juejin.cn/post/6844904039218429960
+
+  ##### 分布式锁可能遇到问题：
+
+  1、锁误解除
+
+  > 如果线程 A 成功获取到了锁，并且设置了过期时间 30 秒，但线程 A 执行时间超过了 30 秒，锁过期自动释放，此时线程 B 获取到了锁；随后 A 执行完成，线程 A 使用 DEL 命令来释放锁，但此时线程 B 加的锁还没有执行完成，线程 A 实际释放的线程 B 加的锁。
+
+  2、超时解锁导致并发
+
+  > 如果线程 A 成功获取锁并设置过期时间 30 秒，但线程 A 执行时间超过了 30 秒，锁过期自动释放，此时线程 B 获取到了锁，线程 A 和线程 B 并发执行。
+
+  上述问题 解决办法：
+
+  > - 将过期时间设置足够长，确保代码逻辑在锁释放之前能够执行完成。
+  > - 为获取锁的线程增加守护线程，为将要过期但未释放的锁增加有效时间。
+
+- [x] 缓存雪崩
+
+  概念
+
+  > 规模的缓存失效情况的发生。 造成原因缓存服务宕机， 大量key 同时过期
+
+  解决方案
+
+  > 针对 缓存服务宕机的情况，只能采用增加副本情况，提高缓存稳定；针对key 同时过期，相对简单timeout+random()
+  >
+  > 如果出现缓存雪崩，主要应对方案服务治理，限流，资源隔离，熔断，降级。(详细点后面补充)
+
+- [x] 缓存击穿
+
+  零值处理？
+
+  > 对于部分数据，可能数据库始终为空，这时应该设置空缓存(用不过期)，避免每次请求都缓存 miss 直接打到 DB。
+
+- [x] 缓存穿透
+
+  singlefly
+
+  > 对关键字进行一致性 hash，使其某一个维度的 key 一定命中某个节点，然后在节点内使用互斥锁，保证归并回源，但是对于批量查询无解；
+
+  分布式锁
+
+  > 设置一个 lock key，有且只有一个人成功，并且返回，交由这个人来执行回源操作，其他候选者轮训 cache 这个 lock key，如果不存在去读数据缓存，hit 就返回，miss 继续抢锁；
+
+  队列
+
+  > 如果 cache miss，交由队列聚合一个key，来 load 数据回写缓存，对于 miss 当前请求可以使用 singlefly 保证回源，如评论架构实现。适合回源加载数据重的任务，比如评论 miss 只返回第一页，但是需要构建完成评论数据索引。
+
+  lease
+
+  > 通过加入 lease 机制，可以很好避免这两个问题，lease 是 64-bit 的 token，与客户端请求的 key 绑定，对于过时设置，在写入时验证 lease，可以解决这个问题；对于 thundering herd，每个key 10s 分配一次，当 client 在没有获取到 lease 时，可以稍微等一下再访问 cache，这时往往cache 中已有数据。（基础库支持 & 修改 cache 源码）；
+
+
+
+- [x] 大key
+
+  ###### 什么是大key
+
+  > 就是一个key的value特别大，比如一个hashmap中存了超多k,v;或者一个列表key中存了超长列表，等等；
+
+  ###### 多大算大
+
+  > hashmap中有100w的k,v => 1s延迟；
+
+  ###### 大key 导致的问题
+
+  > 1、删除大Key的时间复杂度: O(N), N代表大key里的值数量，因为redis是单线程一个个删；所            以删大key也会卡qps。查询突然很慢，qps降低；
+  >
+  > 2、数据倾斜，部分redis分片节点存储占用很高，
+
+  ###### 如何发现
+
+   当版本<4.0
+
+  > 1、导出rdb文件分析: bgsave, redis-rdb-tool;
+  >
+  > 2、命令: redis-cli --bigkeys,找出最大的key；
+  >
+  > 3、自己写脚本扫描;
+  >
+  > 4、单个key查看: debug object key： 查看某个key序列化后的长度，每次看1个key的信息,比较没效率。
+
+     删除大Key:
+
+  > 分解删除操作：
+  >
+  > list: 逐步ltrim;
+  >
+  > zset: 逐步zremrangebyscore;
+  >
+  > hset: hscan出500个，然后hdel删除；
+  >
+  > set: sscan扫描出500个，然后srem删除；
+  >
+  > 依次类推；
+
+  当版本>=4.0
+
+  寻找大key
+
+  > 命令: memory usage
+
+  删除大key
+
+  > lazyfree机制
+  >
+  > unlink命令：代替DEL命令；
+  >
+  > 会把对应的大key放到BIO_LAZY_FREE后台线程任务队列，然后在后台异步删除；
+
+  ######  如何解决
+
+  >  1、实际开发中，不要超过10KB； hash、list、set、zset元素个数不要超过5000。  
+  >
+  >  2、分治法，加一些key前缀\后置分解（如时间、哈希前缀、用户id后缀）;
+
+- [x] 热key
+
+  ###### 如何发现热 Key
+
+  > 1、预估热key，优势：简单，凭经验发现热 Key，提早发现提早处理；缺点：没有办法预测所有热 Key 出现，比如某些热点新闻事件，无法提前预测。
+  >
+  > 2、客户端进行收集，优势：方案简单，缺点：对客户端代码有一定入侵，或者需要对 SDK 工具进行二次开发；没法适应多语言架构，每一种语言的 SDK 都需要进行开发，后期开发维护成本较高。
+  >
+  > 3、在代理层进行收集，对使用方完全透明，能够解决客户端 SDK 的语言异构和版本升级问题；(具体代码麻烦写过的，补充下伪代码)
+
+  ###### 热key 主要解决方式
+
+  >    1、如果数据量不大的情况下，可以考虑local cache， app 定时更  新；
+  >
+  >    2、多 Key 设计: 使用多副本，减小节点热点的问题， 使用多副本 ms_1,ms_2,ms_3 每个节点保存一份数据，使得请求分散到多个节点，避免单点热点问题。注意问题：分片 一时爽，过期火葬场
+  >
+  >    3、多级缓存，同一个 key 在每一个 frontend cluster 都可能有一个 copy，这样会带来 consistency 的问题，但是这样能够降低 latency 和提高 availability。利用 MySQL Binlog 消息 anycast 到不同集群的某个节点清理或者更新缓存；
+  >
+  >    4、如果应用程序层可以忍受稍微过期一点的数据，针对这点可以进一步降低系统负载。当一个key 被删除的时候（delete 请求或者 cache 爆棚清空间了），它被放倒一个临时的数据结构里，会再续上比较短的一段时间。当有请求进来的时候会返回这个数据并标记为“Stale”。对于大部分应用场景而言，Stale Value 是可以忍受的。(不建议，需要修改redis源码)
+
+- [x] redis超时是什么引起的
+
+  1、是否被网络、CPU 或内存（RAM）的限制？
+
+  >     1、 验证客户端和搭建 Redis-Server 的服务器支持的最大带宽是多少；
+  >
+  >     2、 验证是否被客户端或服务器上的 CPU 限制——这将导致请求等待 CPU 时间，从而超时。
+  >
+  >     3、当 Redis 数据量超过分配的内存（RAM）限制时，发生 Redis 锁死，导致超时。
+
+  2、是否有命令（command）在 Redis 服务器上处理时，消耗很长时间？
+
+  >   长时间运行命令的例子有 mget 大量的键、keys* 或写得不好的 lua 脚本。可以运行 SlowLog 命令查看是否有请求花费比预期更长的时间。
+
+  3、redis 在RDB,AOF 时，fork 产生延迟
+
+  > fork操作（在主线程中被执行）本身会引发延迟。在大多数的类unix操作系统中，fork是一个很消耗的操作，因为它牵涉到复制很多与进程相关的对象。而这对于分页表与虚拟内存机制关联的系统尤为明显。对于运行在一个linux/AMD64系统上的实例来说，内存会按照每页4KB的大小分页。为了实现虚拟地址到物理地址的转换，每一个进程将会存储一个分页表（树状形式表现），分页表将至少包含一个指向该进程地址空间的指针。所以一个空间大小为24GB的redis实例，需要的分页表大小为 24GB/4KB*8 = 48MB。    当一个后台的save命令执行时，实例会启动新的线程去申请和拷贝48MB的内存空间。这将消耗一些时间和CPU资源，尤其是在虚拟机上申请和初始化大块内存空间时，消耗更加明显。
+
+  4、swapping (操作系统分页)引起的延迟
+
+  > redis实例的数据，或者部分数据可能就不会被客户端访问，所以系统可以把这部分闲置的数据置换到硬盘上。需要把所有数据都保存在内存中的情况是非常罕见的。一些进程会产生大量的读写I/O。因为文件通常都有缓存，这往往会导致文件缓存不断增加，然后产生交换（swap）。请注意，redis RDB和AOF后台线程都会产生大量文件。
+
+  5、透明大页(transport huge pages)引起的延迟
+
+  > 透明大页，默认是always，启用是为了可以管理更多的内存地址空间。可以使用never关闭，之后会使用系统软件的算法管理内存映射；通常linux会将透明大页开启，在fork被调用后，redis产生的延迟被用来持久化到磁盘。
+  >
+  > 1.fork被调用，共享内存大页的两个进程被创建 
+  >
+  > 2.在一个系统比较活跃的实例里，部分循环时间运行需要几千个内存页，期间引起的copy-on-write 会消耗几乎所有的内存 
+  >
+  > 3.这个将导致更大的延迟和使用更多的内存 
+  >
+  > 因此，redis官方建议需要确保禁掉内存大页： 
+  >
+  > ```
+  > echo never > /sys/kernel/mm/transparent_hugepage/enabled
+  > ```
+
+  ###### 检测命令
+
+  1.查看前num条慢命令，这个所谓的慢是可以通过参数slowlog-log-slower-than设定的，默认10000us，也就是10ms
+
+  ```lua
+  slowlog get num 
+  ```
+
+  2.查看当前实例中哪些key比较占空间(redis-cli的参数)
+
+  ```
+  redis-cli --bigkeys
+  ```
+
+  3.查看redis相关的监控信息
+
+  ```
+  info 相关命令(memory cpu replication stats clients)
+  ```
+
+  
+
+  > 客户端连接数默认限制为10000，生产测试发现超过5000就会影响；total_commands_processed、instantaneous_ops_per_sec、net_io_in_per_sec、net_io_out_per_sec、total_commands、connected_clients、used_memory_human、used_memory_peak_human这些指标都需要关注下；
+
+  4.测试qps
+
+  ```
+  redis-benchmark -h 127.0.0.1 -p 6379 -c 50 -n 10000 -d 2
+  ```
+
+  > 50个并发链接，10000个请求，每个请求2kb。
+
 
 
 
@@ -278,22 +597,240 @@
 
 ##### 3.架构
 
-- [ ] redis是单线程的吗
-- [ ] redis底层网络原理
-- [ ] redis为什么速度比较快
-- [ ] redis的发布/订阅的原理
-- [ ] 数据缓存过期策略
-- [ ] redis内存淘汰策略（说说 redis 中到期删除是怎么实现的）
-- [ ] redis 的删除策略。定时 定期 惰性 lru(LRU高频)
-- [ ] 持久化策略及其对比:RDB和AOF区别，AOF重写（如果数据量比较大都可能会造成redis 抖动）
-- [ ] 持久化机制，AOF、RDB具体区别有哪些？ 
+- [x] redis是单线程的吗
+
+  Redis在6.0推出了多线程，可以在高并发场景下利用CPU多核多线程读写客户端数据，进一步提升server性能，当然，只是针对客户端的读写是并行的，每个命令的真正操作依旧是单线程的。
+
+  **主要目的** 解决并发量非常大时，单线程读写客户端IO数据存在性能瓶颈，虽然采用IO多路复用机制，但是读写客户端数据依旧是同步IO，只能单线程依次读取客户端的数据，无法利用到CPU多核。
+
+- [x] redis底层网络原理
+
+  别问，问就是reactor
+
+- [x] redis为什么速度比较快
+
+  > 1.Redis 大部分操作是在内存上完成，并且采用了高效的数据结构如哈希表和跳表
+  >
+  > 2.Redis 采用多路复用，能保证在网络 IO 中可以并发处理大量的客户端请求，实现高吞吐率
+
+- [x] redis的发布/订阅的原理
+
+  命令
+
+  ```
+  SUBSCRIBE first second   //订阅 first, second 两个topic
+  ```
+
+  ```
+   PUBLISH second Hello    //往topic second 写数据
+  ```
+
+  原理
+
+  ![digraph pubsub {      rankdir = LR;      node [shape = record, style = filled];      edge [style = bold];      // keys      pubsub [label = "pubsub_channels |<channel1> channel1 |<channel2> channel2 |<channel3> channel3 | ... |<channelN> channelN", fillcolor = "#A8E270"];      // clients blocking for channel1     client1 [label = "client1", fillcolor = "#95BBE3"];     client5 [label = "client5", fillcolor = "#95BBE3"];     client2 [label = "client2", fillcolor = "#95BBE3"];     null_1 [label = "NULL", shape = plaintext];          pubsub:channel1 -> client2;     client2 -> client5;     client5 -> client1;     client1 -> null_1;      // clients blocking for channel2     client7 [label = "client7", fillcolor = "#95BBE3"];     null_2 [label = "NULL", shape = plaintext];      pubsub:channel2 -> client7;     client7 -> null_2;      // channel      client3 [label = "client3", fillcolor = "#95BBE3"];     client4 [label = "client4", fillcolor = "#95BBE3"];     client6 [label = "client6", fillcolor = "#95BBE3"];     null_3 [label = "NULL", shape = plaintext];      pubsub:channel3 -> client3;     client3 -> client4;     client4 -> client6;     client6 -> null_3; }](https://redisbook.readthedocs.io/en/latest/_images/graphviz-241c988b86bb9bed6bf26537e654baaab4eef77b.svg)
+
+  
+
+- [x] 数据缓存过期策略
+
+  > 在设置了过期时间的数据中进行淘汰，包括 volatile-random、volatile-ttl、volatile-lru、volatile-lfu（Redis 4.0 后新增）四种。
+  >
+  > 在所有数据范围内进行淘汰，包括 allkeys-lru、allkeys-random、allkeys-lfu（Redis 4.0 后新增）三种。
+  >
+  > volatile-ttl 在筛选时，会针对设置了过期时间的键值对，根据过期时间的先后进行删除，越早过期的越先被删除。
+  >
+  > volatile-random 就像它的名称一样，在设置了过期时间的键值对中，进行随机删除。
+  >
+  > volatile-lru 会使用 LRU 算法筛选设置了过期时间的键值对。
+  >
+  > volatile-lfu 会使用 LFU 算法选择设置了过期时间的键值对。
+
+- [x] redis内存淘汰策略（说说 redis 中到期删除是怎么实现的）
+
+  ###### 定时删除
+
+         在设置某个key 的过期时间同时，我们创建一个定时器，让定时器在该过期时间到来时，立即执行对其进行删除的操作。
+      
+         优点：定时删除对内存是最友好的，能够保存内存的key一旦过期就能立即从内存中删除。
+      
+         缺点：对CPU最不友好，在过期键比较多的时候，删除过期键会占用一部分 CPU 时间，对服务器的响应时间和吞吐量造成影响。
+
+  ###### 惰性删除
+
+         设置该key 过期时间后，我们不去管它，当需要该key时，我们在检查其是否过期，如果过期，我们就删掉它，反之返回该key。
+
+  　　优点：对 CPU友好，我们只会在使用该键时才会进行过期检查，对于很多用不到的key不用浪费时间进行过期检查。
+
+  　　缺点：对内存不友好，如果一个键已经过期，但是一直没有使用，那么该键就会一直存在内存中，如果数据库中有很多这种使用不到的过期键，这些键便                永远不会被删除，内存永远不会释放。从而造成内存泄漏。
+
+  ###### 定期删除
+
+         每隔一段时间，我们就对一些key进行检查，删除里面过期的key。
+
+  　　优点：可以通过限制删除操作执行的时长和频率来减少删除操作对 CPU 的影响。另外定期删除，也能有效释放过期键占用的内存。
+
+  　　缺点：难以确定删除操作执行的时长和频率。
+
+  　　　　　如果执行的太频繁，定期删除策略变得和定时删除策略一样，对CPU不友好。
+
+  　　　　　如果执行的太少，那又和惰性删除一样了，过期键占用的内存不会及时得到释放。
+
+  　　　　　另外最重要的是，在获取某个键时，如果某个键的过期时间已经到了，但是还没执行定期删除，那么就会返回这个键的值，这是业务不能忍受的错                误。
+
+- [x] redis 的删除策略。定时 定期 惰性 lru(LRU高频)
+
+  同上
+
+- [x] 持久化策略及其对比:RDB和AOF区别，AOF重写（如果数据量比较大都可能会造成redis 抖动）
+
+  ##### AOF
+
+  ###### 开启AOF
+
+  Redis服务器默认开启RDB，关闭AOF；要开启AOF，需要在配置文件中配置：
+
+  ```
+  appendonly yes
+  ```
+
+  ###### 执行流程
+
+  - 命令追加(append)：将Redis的写命令追加到缓冲区aof_buf；
+  - 文件写入(write)和文件同步(sync)：根据不同的同步策略将aof_buf中的内容同步到硬盘；
+  - 文件重写(rewrite)：定期重写AOF文件，达到压缩的目的。
+
+  注意：
+
+  >  AOF 采用写后日志。
+  >
+  >  优势
+  >
+  >  1、可以避免对当前指令的阻塞;
+  >
+  >  2、可以避免出现记录错误日志。
+  >
+  >  劣势
+  >
+  >  1、 可能会对之后的指令造成阻塞；
+  >
+  >  2、 当未及时记录日志丢失数据
+
+  ###### 三种回写策略 
+
+  ![image-20210307204809914](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210307204809914.png)
+
+  ###### AOF 重写流程
+
+  ![image-20210307204832364](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210307204832364.png)
+
+  > 1、执行AOF重写请求。
+  >
+  > 如果当前进程正在执行AOF重写，请求不执行。
+  >
+  > 如果当前进程正在执行bgsave操作，重写命令延迟到bgsave完成之后再执行。
+  >
+  > 2、父进程执行fork创建子进程，开销等同于bgsave过程。
+  >
+  > 3.1、主进程fork操作完成后，继续响应其它命令。
+  >
+  > 　　所有修改命令依然写入AOF文件缓冲区并根据appendfsync策略同步到磁盘，保证原有AOF机制正确性。
+  >
+  > 3.2、由于fork操作运用写时复制技术，子进程只能共享fork操作时的内存数据
+  >
+  > 　　由于父进程依然响应命令，Redis使用“AOF”重写缓冲区保存这部分新数据，防止新的AOF文件生成期间丢失这部分数据。
+  >
+  > 4、子进程依据内存快照，按照命令合并规则写入到新的AOF文件。
+  >
+  > 　　每次批量写入硬盘数据量由配置aof-rewrite-incremental-fsync控制，默认为32MB，防止单次刷盘数据过多造成硬盘阻塞。
+  >
+  > 5.1、新AOF文件写入完成后，子进程发送信号给父进程，父进程更新统计信息。
+  >
+  > 5.2、父进程把AOF重写缓冲区的数据写入到新的AOF文件。
+  >
+  > 5.3、使用新的AOF文件替换老的AOF文件，完成AOF重写。
+
+  AOF 重写
+
+  > 由后台子进程 bgrewriteaof 来完成,主要目的 避免阻塞主线程，导致数据库性能下降。 
+
+  风险
+
+  > 1、fork子进程，fork这个瞬间一定是会阻塞主线程的；
+  >
+  > 2、如果父进程此时有写操作并且是已经存在的key, 则父进程就会真正copy这个key(COW), 如果这个key 是大key 的话就会导致copy 时间较长，产生阻塞风险；
+
+  AOF重写不复用AOF本身的日志，
+
+  > 1、防止与父进程产生文件竞争；
+  >
+  > 2、防止重写失败污染原AOF文件。
+
+  ###### 其他
+
+  > 1、同时需要注意在rewriteAOF 时，会引起CPU 升高，原因需要扫描。
+  >
+  > 2、重写触发条件：通过配置自动触发， 触发条件文件大小和基准增量；2、手动触发 bgrewriteaof
+
+  ##### RDB
+
+  ###### 开启RDB
+
+  > ```
+  > save or bgsave
+  > ```
+
+  ###### 执行流程
+
+  ![img](https://images2018.cnblogs.com/blog/1174710/201806/1174710-20180605085813461-389677620.png)
+
+  > 1、Redis父进程首先判断：当前是否在执行save，或bgsave/bgrewriteaof（后面会详细介绍该命令）的子进程，如果在执行则bgsave命令直接返回。bgsave/bgrewriteaof 的子进程不能同时执行，主要是基于性能方面的考虑：两个并发的子进程同时执行大量的磁盘写操作，可能引起严重的性能问题。
+  >
+  > 2、父进程执行fork操作创建子进程，这个过程中父进程是阻塞的，Redis不能执行来自客户端的任何命令
+  >
+  > 3、父进程fork后，bgsave命令返回”Background saving started”信息并不再阻塞父进程，并可以响应其他命令
+  >
+  > 4、子进程创建RDB文件，根据父进程内存快照生成临时快照文件，完成后对原有文件进行原子替换
+  >
+  > 5、子进程发送信号给父进程表示完成，父进程更新统计信息  
+
+  ###### 细节
+
+  > 1、如果在执行 RDB 时，又触发RDB， 会等到第一次RDB 执行完之后，再执行。
+  >
+  > 2、如果在执行RDB时，有新数据写入时，RDB 并不会将新写入的数据进行持久化
+  >
+  > 3、在RDB 结束后，子进程内存退出，内存回收是怎样的？
+  >
+  >   1、 子进程指向的内存数据， 没有被父进程修改(cow)，则归父进程持有；
+  >
+  >      2、如果在RDB 期间，父进程有对原数据修改对这部分key 进行了cow， 则在子进程退出时，这部分内存会被回收。
+
+- [x] 持久化机制，AOF、RDB具体区别有哪些？ 
+
+  ###### RDB持久化
+
+  > 优点：RDB文件紧凑，体积小，网络传输快，适合全量复制；恢复速度比AOF快很多。当然，与AOF相比，RDB最重要的优点之一是对性能的影响相对较小。
+  >
+  > 缺点：RDB文件的致命缺点在于其数据快照的持久化方式决定了必然做不到实时持久化，而在数据越来越重要的今天，数据的大量丢失很多时候是无法接受的，因此AOF持久化成为主流。此外，RDB文件需要满足特定格式，兼容性差（如老版本的Redis不兼容新版本的RDB文件）。
+
+  ###### AOF持久化
+
+  > 与RDB持久化相对应，AOF的优点在于支持秒级持久化、兼容性好，缺点是文件大、恢复速度慢、对性能影响大。
+
 - [ ] redis主从复制过程
+
 - [ ] Redis 主从同步机制是怎么样的，⽐如slave启动之后同步过程？
+
 - [ ] redis的部署模式
+
 - [ ] Redis Cluster集群如何选主的？
+
 - [ ] Redis Cluster 跟哨兵模式有什么区别吗？ 
+
 - [ ] Sentinel 哨兵模式是如何选主的？
+
 - [ ] redis哨兵选leader过程、槽相关、redis-cluster和codis扩展
+
 - [ ] 这⾥说跟cluster差不多，追问了下，其实还是有些区别的， sdown odown 主观宕机、客观宕机⽅式不太⼀样
 
 
@@ -498,18 +1035,18 @@
 - [ ] chan 底层实现 、 make(chan struct {}) 和 make(chan bool) 在chan的源码实现上有什么区别，chan，什么时候会panic
 
   1.  循环队列+mutex（注意下 no buffer 的在读取时的优化，其他大概回答下 ）；make(chan, 1) 和make(chan) 的区别 。 顺便可以说下channel 的优雅关闭 
-     注意点：在有等待的receiver 时，发送方会越过channel buffer 直接将数据copy 到receiver 。
-     源码解析 参考 https://github.com/cch123/golang-notes/blob/master/channel.md
-  2. 第二个问题: 大概是问struct{} 在go内部做了优化，不占用内存；其他类型(int, bool, ptr)都需要64位(bool 待定)。可以不具体回答字节数
-  3. chan，什么时候会panic
-     write to close(chan)
+      注意点：在有等待的receiver 时，发送方会越过channel buffer 直接将数据copy 到receiver 。
+      源码解析 参考 https://github.com/cch123/golang-notes/blob/master/channel.md
+  2.  第二个问题: 大概是问struct{} 在go内部做了优化，不占用内存；其他类型(int, bool, ptr)都需要64位(bool 待定)。可以不具体回答字节数
+  3.  chan，什么时候会panic
+      write to close(chan)
 
 - [ ] 有缓冲channel和无缓冲channel区别？
 
 - [ ] map 底层实现&sync.Map的区别
 
-   	1. 原理参考：https://tonybai.com/2020/11/10/understand-sync-map-inside-through-examples/
-       源码解析: https://github.com/cch123/golang-notes/blob/master/sync.md
+      1. 原理参考：https://tonybai.com/2020/11/10/understand-sync-map-inside-through-examples/
+      源码解析: https://github.com/cch123/golang-notes/blob/master/sync.md
 
 - [ ] golang 的map 插入顺序和输出顺序是一样的吗？
 
@@ -521,8 +1058,8 @@
 
 - [ ] go内存泄漏
 
-   	1. 内存泄漏场景： https://gfw.go101.org/article/memory-leaking.html 
-       有兴趣可以看下这个： https://xargin.com/logic-of-slice-memory-leak/
+      1. 内存泄漏场景： https://gfw.go101.org/article/memory-leaking.html 
+      有兴趣可以看下这个： https://xargin.com/logic-of-slice-memory-leak/
 
 - [ ] 内存对齐，说说为什么要内存对齐，原理原因
 
@@ -530,12 +1067,12 @@
 
 - [ ] go gc的实现与触发机制
 
-   	1. 实现： https://github.com/yifhao/share/blob/master/gopher%20meetup-%E6%B7%B1%E5%85%A5%E6%B5%85%E5%87%BAGolang%20Runtime-yifhao-%E5%AE%8C%E6%95%B4%E7%89%88.pdf
-   	2. 触发：
-        	1. 主动触发 通过调用 runtime.GC 来触发 GC，此调用阻塞式地等待当前 GC 运行完毕；
-        	2. 被动触发，分为两种方式：
-            使用系统监控，当超过两分钟没有产生任何 GC 时，强制触发 GC。
-            使用步调（Pacing）算法，其核心思想是控制内存增长的比例。
+      1. 实现： https://github.com/yifhao/share/blob/master/gopher%20meetup-%E6%B7%B1%E5%85%A5%E6%B5%85%E5%87%BAGolang%20Runtime-yifhao-%E5%AE%8C%E6%95%B4%E7%89%88.pdf
+      2. 触发：
+          1. 主动触发 通过调用 runtime.GC 来触发 GC，此调用阻塞式地等待当前 GC 运行完毕；
+          2. 被动触发，分为两种方式：
+           使用系统监控，当超过两分钟没有产生任何 GC 时，强制触发 GC。
+           使用步调（Pacing）算法，其核心思想是控制内存增长的比例。
 
 - [ ] interface 底层实现，怎么判空？
 
@@ -544,7 +1081,7 @@
   1. 底层实现
 
      1. 接口有两种底层结构,分别是：`iface` 和 `eface` ，区别在于 `iface` 描述的接口包含方法，而 `eface` 则是不包含任何方法的空接口：`interface{}`。
-     2.  `iface` 内部维护两个指针，`tab` 指向一个 `itab` 实体， 它表示接口的类型以及赋给这个接口的实体类型。`data` 则指向接口具体的值，一般而言是一个指向堆内存的指针。`_type` 字段描述了实体的类型，包括内存对齐方式，大小等；`inter` 字段则描述了接口的类型。`fun` 字段放置和接口方法对应的具体数据类型的方法地址，实现接口调用方法的动态分派，一般在每次给接口赋值发生转换时会更新此表，或者直接拿缓存的 itab
+     2. `iface` 内部维护两个指针，`tab` 指向一个 `itab` 实体， 它表示接口的类型以及赋给这个接口的实体类型。`data` 则指向接口具体的值，一般而言是一个指向堆内存的指针。`_type` 字段描述了实体的类型，包括内存对齐方式，大小等；`inter` 字段则描述了接口的类型。`fun` 字段放置和接口方法对应的具体数据类型的方法地址，实现接口调用方法的动态分派，一般在每次给接口赋值发生转换时会更新此表，或者直接拿缓存的 itab
      3. ![](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210306153606436.png)
      4. ![](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210306153634432.png)
      5. `interfacetype` 类型，它描述的是接口的类型，它包装了 `_type` 类型，`_type` 实际上是描述 Go 语言中各种数据类型的结构体。我们注意到，这里还包含一个 `mhdr` 字段，表示接口所定义的函数列表， `pkgpath` 记录定义了接口的包名
@@ -628,7 +1165,7 @@
 
 - [ ] Context 的使用，用法，有无父子关系？怎么去做并发控制？底层实现（高频）
 
-  ​	
+  ​    
 
 - [ ] context 的使用，context是否并发安全？
 
