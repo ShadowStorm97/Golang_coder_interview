@@ -803,7 +803,7 @@
   >
   > 1、 子进程指向的内存数据， 没有被父进程修改(cow)，则归父进程持有；
   >
-  >   2、如果在RDB 期间，父进程有对原数据修改对这部分key 进行了cow， 则在子进程退出时，这部分内存会被回收。
+  > 2、如果在RDB 期间，父进程有对原数据修改对这部分key 进行了cow， 则在子进程退出时，这部分内存会被回收。
 
 - [x] 持久化机制，AOF、RDB具体区别有哪些？ 
 
@@ -859,9 +859,9 @@
     > 5.当slave收到的投票超过半数后就可以成为master
     > 6.广播消息通知其他节点
     >
-    > 	1.当slave发现自己的master挂了并不会立即进行请求投票,会有一定的延时,确保其他的master也意识到当前的master挂了,否则master可能会拒绝投票
+    > 1.当slave发现自己的master挂了并不会立即进行请求投票,会有一定的延时,确保其他的master也意识到当前的master挂了,否则master可能会拒绝投票
     >
-    >  2.延时计算公式Delay=500ms+random(0-500)ms+Slave_rank* 100ms(slave_rank为复制数据的等级,等级越小表示复制数据越多也是为了保证能让拥有最新数据的slave最先发起选举)
+    > 2.延时计算公式Delay=500ms+random(0-500)ms+Slave_rank* 100ms(slave_rank为复制数据的等级,等级越小表示复制数据越多也是为了保证能让拥有最新数据的slave最先发起选举)
 
     ##### 名词解释
 
@@ -1370,7 +1370,222 @@
   2. new只有一个type参数，type可以是任意类型数据; make可以有多个参数，但是只能是slice，map，或者chan
   3. new返回的指针指向的地址值为类型的0值;make返回的是非零值的实例
 
-- [ ] reflect 的使用
+- [x] reflect 的使用
+
+     #### 含义
+
+     > reflect 是指在运行时动态的调整对象的方法和属性
+
+     #### 原理
+
+     ##### 1、在go 语言中，关于类型设计的一些原则
+
+     > 1.变量包括(type, value)两部分，理解这一点就知道为什么 nil != nil。
+     >
+     > 2.type 包括 static type 和concrete type. 简单的说 static type 是在编码时可以看见的类型(int、string)，
+     >
+     > concrete type 是runtime 系统看见的类型。
+     >
+     > 3.类型断言是否能成功，取决于变量的concrete type。比如一个 reader变量如果它的concrete type也实现了write方法的话，
+     >
+     > 它也可以被类型断言为writer.
+
+     ##### 2、reflect的基本功能TypeOf和ValueOf
+
+     ###### 1、TypeOf
+
+     ```go
+     // TypeOf returns the reflection Type that represents the dynamic type of i.
+     // If i is a nil interface value, TypeOf returns nil.
+     func TypeOf(i interface{}) Type {
+           eface := *(*emptyInterface)(unsafe.Pointer(&i))
+           return toType(eface.typ) 
+     
+      }     
+     ```
+
+      对于reflect.TypeOf， 传参是一个空接口类型, 返回值是一个reflet.Type 非空接口类型
+
+     ```go
+     type Type interface { 
+         //对齐边界
+         Align() int         
+         // 如果是 struct 的字段，对齐后占用的字节数
+         FieldAlign() int    
+         // 方法
+         Method(int) Method
+         //  通过名称获取方法
+         MethodByName(string) (Method, bool)  
+         // 获取类型方法集里导出的方法个数
+         NumMethod() int   
+         // 类型名称
+         Name() string
+         // 返回类型所在包的路径
+         PkgPath() string
+         // 返回类型的大小，和 unsafe.Sizeof 功能类似
+         Size() uintptr
+         // 返回类型的字符串表示形式
+         String() string
+         // 返回类型的类型值
+         Kind() Kind
+         // 类型是否实现了接口 u
+         Implements(u Type) bool
+         // 是否可以赋值给 u
+         AssignableTo(u Type) bool
+         // 是否可以类型转换成 u
+         ConvertibleTo(u Type) bool
+         // 类型是否可以比较
+         Comparable() bool
+        // many others......
+     }
+     ```
+
+     以下面代码为例，说明下reflect.TypeOf 原理：
+
+     ```go
+     type Eggo struct{
+         Name string
+     }
+     
+     func(e *Eggo)A(){
+         println("A")
+     }
+     func(e *Eggo)B(){
+         println("B")
+     }
+     
+     func main(){
+         a := Eggo{Name:"eggo"}
+         t := reflect.TypeOf(a)
+         
+         println(t.Name(), t.NumMethod())
+     }
+     ```
+
+     1、从函数调用栈来看， 下图所示 main 函数栈帧中有两个局部变量: Eggo 类型的a， reflect.Type 类型的t ，临时变量， 返回值，参数空间；
+
+     > **临时空间**      
+     >
+     >    前文提到 go 语言中传参都是值拷贝， 参数空间中的值应该是a的值拷贝，由于参数空间是空接口类型，需要一个地址，但是go 语言中传参都是值拷贝，所以不论 `reflect.Typeof`  对a 做什么样的修改都不能作用到 原变量a的身上， 如果直接拷贝a的地址，则不符合go 语言的值拷贝语义， 所以不能直接将a的地址copy到参数空间中。为了解决这个问题，go 在编译期间增加了一个临时变量作为a的拷贝，这样就可以在参数空间使用这个临时变量的地址。通过传递拷贝后变量的地址， 来实现传值的语义。
+
+  ![image-20210310071241188](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210310071241188.png)
+
+     2、查看 `func TypeOf`  源码不难发现
+
+     ```go
+     func TypeOf(i interface{}) Type {
+           eface := *(*emptyInterface)(unsafe.Pointer(&i))
+           return toType(eface.typ) 
+     }
+     type emptyInterface struct {                                                                                                 
+           typ  *rtype
+           word unsafe.Pointer
+     }
+     // nonEmptyInterface is the header for an interface value with methods.
+     type nonEmptyInterface struct {
+         // see ../runtime/iface.go:/Itab
+         itab *struct {
+             ityp *rtype // static interface type
+             typ  *rtype // dynamic concrete type
+             hash uint32 // copy of typ.hash
+             _    [4]byte        
+             fun  [100000]unsafe.Pointer // method table
+         } 
+         word unsafe.Pointer     
+     }     
+     
+     ```
+
+     `reflec.TypeOf` 函数之后会将runtime.eface 类型的参数， 转换成`reflect.emptyInterface`类型(在源码中，两者的结构是一样的)，并给赋值给eface，在源码中由于*rtype 类型实现了Type接口。最终转换成如下图所显示：
+
+     ![image-20210310071315360](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210310071315360.png)
+
+     > ret  为非空接口格式 `iface`，`itab` 这里接口类型`inter`自然是`reflect.Type`, 动态类型`_type`是*rtype, `fun` 对应的类型方法对应的就是`eface.typ` 实现的相关方法。
+     >
+     > ```go
+     > // interface 相关的代码
+     > //eface 空接口类型
+     > type eface struct {      //空接口
+     >  _type *_type         //类型信息
+     >  data  unsafe.Pointer //指向数据的指针(go语言中特殊的指针类型unsafe.Pointer类似于c语言中的void*)
+     > }
+     > 
+     > // iface 表示 non-empty interface 的数据结构
+     > type iface struct {
+     > tab  *itab
+     > data unsafe.Pointer
+     > }
+     > type itab struct {
+     > inter  *interfacetype   // 接口自身的元信息
+     > _type  *_type           // 具体类型的元信息
+     > link   *itab
+     > bad    int32
+     > hash   int32            // _type里也有一个同样的hash，此处多放一个是为了方便运行接口断言
+     > fun    [1]uintptr       // 函数指针，指向具体类型所实现的方法
+     > }
+     > ```
+
+     3、回到列子中，`reflect.TypeOf(a)`返回值 一个`reflect.Type` 和`*rtype` 组合 对应的`itab` 指针和一个`Eggo` 类型元数据地址。所以通过`reflect.TypeOf` 拿到的就是`a` 中非空接口变量t。比如`t.Name()`, `t.NumMethod()` 调用的这些方法就回去`Eggotype` 指向的`Eggo`类型元数据查找相关信息。
+
+     ###### ValueOf
+
+  ```go
+  func ValueOf(i interface{}) Value {
+      if i == nil {         
+          return Value{}    
+      }                     
+      // TODO: Maybe allow contents of a Value to live on the stack.
+      // For now we make the contents always escape to the heap. It
+      // makes life easier in a few places (see chanrecv/mapassign
+      // comment below).    
+      escapes(i)            
+  
+      return unpackEface(i) 
+  }
+  ```
+
+  1、`escapes(i)` 表示`reflect.ValueOf` 函数会显示的将参数指向的变量逃逸到堆上；
+
+  2、以下面代码为例
+
+  ```go
+  func main(){
+      a := "eggo"
+      v := reflect.ValueOf(a)
+      v.SetString("new eggo")  // panic: reflect.Value.SetString using unaddressable value
+      println(a)
+  }
+  ```
+
+  上述想修改变量a 中的值为“new eggo”， 画出main 的栈帧如下图所示：
+
+  ![image-20210310071402581](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210310071402581.png)
+
+  > 1. 函数栈中：一个局部变量a 和局部类型v， 编译阶段会增加一个临时变量作为a 的拷贝，`ValueOf` 返回值空间，以及参数空间。
+  > 2. 参数这里`data`指向a的拷贝， `_type` 指向string类型元数据； `ValueOf` 返回值，这里`typ` 等于参数的的一个字段， `ptr` 等于参数的第二个字段， 处理flag 标记；
+  > 3. 接下来通过v 调用SetString 时，因为ptr 指向a 的拷贝而不是a，而修改这样一个用户都不知道的临时变量，没有任何意义。会出现panic()。
+
+  3、为了能够修改变量a 中值 这里需要反射a的指针
+
+  ```go
+  func main(){
+      a := "eggo"
+      v := reflect.ValueOf(a)
+      v = v.Elem()
+      v.SetString("new eggo")  // panic: reflect.Value.SetString using unaddressable value
+      println(a)
+  }
+  ```
+
+   这样`valueof` 函数参数指向的变量就是a。
+
+  ![image-20210310071420318](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210310071420318.png)
+
+  > 1.上图 在main 函数栈帧中，局部变量a就逃逸到堆上，栈上只留一个地址， 然后是局部变量v， 返回值和参数;
+  >
+  > 2.参数这里`_type` 指向`*string` 类型元数据，data 指向a，valueof 返回值赋值给局部变量v；
+  >
+  > 3.调用v 点`Elem()` 方法， 会拿到`v.ptr` 指向的变量a，并包装成`reflect.Value` 类型的返回值，返回值中类型是`string`， 地址是指向堆上的a，然后这个返回值会被赋给V
 
   
 
