@@ -1583,7 +1583,76 @@
 
 - [ ] go内存分配
 
+  ###### 简介
+
+  > 1.go 内存管理借鉴了TCMalloc
+  >
+  > 
+  >
+  > 
+  >
+  > 3.使用span 机制来减少内存碎片，每个span至少为一个page(8KB)，每个span用于一个范围的内存分配需求.比如16-32 byte使用分配32byte的span，112-128 使用分配128byte的span；
+  >
+  > ![image-20210312001223133](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312001223133.png)
+  >
+  > 4.一共有67个size范围，8byte-32KB,每个size 有两种类型(scan 和noscan， 表示分配的对象是否包含指针)；
+  >
+  > 
+  >
+  > 5.多层cache 来减少分配的冲突，per-P 无所的mcache，全局67*2个对应不同size的span的后备mcentral，全局1个mheap；
+  >
+  > ![image-20210312001242929](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312001242929.png)
+  >
+  > 6.mheap中以treap的结构维护空闲连续page.归还内存到heap时，连续地址会进行合并(想一下伙伴系统)
+  >
+  > 7.stack 分配也是多层次和多class的；
+  >
+  > 8.对象由GC进行回收.sysmon会定时把空余的内存归还给系统
+  >
+  > ***特点***：
+  >
+  > 使用一小块一小块的连续内存页，进行分配某个范围大小的内存需求，比如某个连续8KB专门用于分配17-24字节，以此减少内存碎片， 线程拥有一定的cache, 可用于无锁分配，同时Go对于GC后回收的内存页, 并不是马上归还给操作系统, 而是会延迟归还, 用于满足未来的内存需求。
+
+  ###### 内存结构
+
+  ***1.10 及以前***
+
+  
+
+  ***1.11及以后***
+
+  
+
+  ***mspan***
+
+  ![image-20210312001301800](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312001301800.png)
+
+  ![image-20210312001518288](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312001518288.png)
+
+  ***简而言之***
+
+  一般小对象使用mspan 进行分配；大对象则直接由mheap分配内存。
+
+  > 1.*Go在程序启动时，会向操作系统申请一块大内存，由mheap 全局管理(现在Go版本不需要连续地址了，所以不会申请一大堆地址)；*
+  >
+  > 2.*Go* *内存管理的基本单元是* *mspan，每种* *mspan* *可以分配特定大小的* *object*
+  >
+  > 3.*mcache,* *mcentral,* *mheap* *是 Go* *内存管理的三大组件，mcache* *管理线程在本地缓存的* *mspan；mcentral* *管理全局的* *mspan* *供所有线程*
+
 - [ ] go 内存分配，大小对象内存分配区别？多级分配的优点是什么？
+
+  ###### <= maxTinySize(16B)
+
+  ![image-20210312001334441](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312001334441.png)
+
+  ###### > 32KB
+
+  ![image-20210312001355976](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312001355976.png)
+
+  > Go 没法使用工作线程的本地缓存 mcache 和全局中心缓存 mcentral 上管理超过32KB的内存分配，
+  >
+  > 所以对于那些超过32KB的内存申请，会直接从堆上(*mheap*)上分配对应的数量的内存页(每页大小是8KB)给程序。
+
 
 - [ ] go内存泄漏
 
@@ -1926,22 +1995,6 @@
 - [ ] go 性能问题的定位( pprof,各项指标)
 
 - [ ] 逃逸分析能做什么？如何进行逃逸分析？
-
-- [ ] go gc的实现与触发机制
-
-- [ ] go 内存分配
-
-- [x] GC相关
-
-![image-20210312000303854](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312000303854.png)
-
-![image-20210312000338592](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312000338592.png)
-
-![image-20210312000352227](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312000352227.png)
-
-![image-20210312000403454](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312000403454.png)
-
-
 
 
 
