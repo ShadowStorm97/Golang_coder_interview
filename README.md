@@ -1389,13 +1389,68 @@
 ##### 1.TCP/UDP
 
 - [ ] TCP和UDP的区别,TCP三次握手？SEQ 是干什么的？两次握手行不行？　TCP Fast Open了解么,TCP的拥塞控制是怎么做的
-- [ ] tcp 拥塞策略(高频)(RBB)
-- [ ] tcp协议栈中TIME_WAIT字段的作用(高频) https://mp.weixin.qq.com/s/8WmASie_DjDDMQRdQi1FDg
-- [ ] tcp的和colse_wait状态
-- [ ] 如何解决tcp的粘包问题，tcp的拆包粘包怎么处理？为什么会有TIME_WAIT？ (自定以协议中包含 包体长度)
-- [ ] 如何理解网络模型(重点epoll , select 的区别。 实现非阻塞 connect， 使用select)
-- [ ] tcp的send函数返回一定代表数据从网卡发送出去了么？我说只是发送到了内核缓冲区。又问这个缓冲区也是属于该进程的么？回答是。又继续问，一个数据接收过程发生了几次用户态到内核态的拷贝？
 
+  ###### TCP 和UDP 区别
+
+  > 不知道
+
+  ###### TCP三次握手
+
+  > 自己查去
+
+  ###### SEQ 是干什么的
+
+  > 序列号
+  >
+  > - 序列号（Sequence Number）字段**标识了TCP发送端到TCP接收端的数据流的一个字节**，该字节代表着**包含该序列号的报文段的数据中的第一个字节**
+
+  ###### 两次握手行不行？
+
+  >  第一、二次握手后，服务端并不知道客户端的接收能力以及自己的发送能力是否正常。而在第三次握手时，服务端收到了客户端对第二次握手作的回应。从服务端的角度，我在第二次握手时的响应数据发送出去了，客户端接收到了。所以，我的发送能力是正常的。而客户端的接收能力也是正常的。
+
+- [ ] syn flood攻击(低频)
+
+  > 最基本的DoS攻击就是利用合理的服务请求来占用过多的服务资源，从而使合法用户无法得到服务的响应。syn flood属于Dos攻击的一种。
+  >
+  > 如果恶意的向某个服务器端口发送大量的SYN包，则可以使服务器打开大量的半开连接，分配TCB（Transmission Control Block）, 从而消耗大量的服务器资源，同时也使得正常的连接请求无法被相应。当开放了一个TCP端口后，该端口就处于Listening状态，不停地监视发到该端口的Syn报文，一 旦接收到Client发来的Syn报文，就需要为该请求分配一个TCB，通常一个TCB至少需要280个字节，在某些操作系统中TCB甚至需要1300个字节，并返回一个SYN ACK命令，立即转为SYN-RECEIVED即半开连接状态。系统会为此耗尽资源。
+
+- [ ] tcp 拥塞策略(高频)(RBB)
+
+  
+
+- [ ] CLOSE_WAIT
+
+  > CLOSE_WAIT：被动关闭连接的一方，有一个中间状态，即CLOSE_WAIT
+  >
+  > CLOSE_WAIT很多，表示说要么是你的应用程序写的有问题，没有合适的关闭socket；要么是说，你的服务器CPU处理不过来（CPU太忙）或者你的应用程序一直睡眠到其它地方(锁，或者文件I/O等等)，你的应用程序获得不到合适的调度时间，造成你的程序没法真正的执行close操作
+
+- [ ] TIME_WAIT(高频) 
+
+  > TIME_WAIT 主动调用socket的close操作的一方，最终会进入TIME_WAIT状态
+
+  ###### 作用
+
+  > 第一，防止前一个连接【五元组，我们继续 180.172.35.150:45678, tcp, 180.97.33.108:80 为例】上延迟的数据包或者丢失重传的数据包，被后面复用的连接【前一个连接关闭后，此时你再次访问百度，新的连接可能还是由180.172.35.150:45678, tcp, 180.97.33.108:80 这个五元组来表示，也就是源端口凑巧还是45678】错误的接收（异常：数据丢了，或者传输太慢了）
+
+  > 第二，确保连接方能在时间范围内，关闭自己的连接。其实，也是因为丢包造成的
+  >
+  > ![图片](http://mmbiz.qpic.cn/mmbiz/GjBicz1ItfB0Bycan3VNrZQFHMDLiaYaw5ARzTSH0PKruhcVhcAqfUTJG1KBDWGLH4FLwhYJ8iay9ib8OKknlG1vzA/640?wx_fmt=png&tp=webp&wxfrom=5&wx_lazy=1&wx_co=1)
+
+  ###### TIME_WAIT状态会是持续2MSL
+
+  > 这个定义，更多的是一种保障（IP数据包里的TTL，即数据最多存活的跳数，真正反应的才是数据在网络上的存活时间），确保最后丢失了ACK，被动关闭的一方再次重发FIN并等待回复的ACK，一来一去两个来回。内核里，写死了这个MSL的时间为：30秒（RFC里建议的MSL其实是2分钟，但是很多实现都是30秒），所以TIME_WAIT的即为1分钟：
+
+  timewait/close_wait 强烈看下这个链接  https://mp.weixin.qq.com/s/8WmASie_DjDDMQRdQi1FDg
+
+- [ ] 如何解决tcp的粘包问题，tcp的拆包粘包怎么处理？
+
+   自定以协议中包含 包体长度
+
+- [ ] 如何理解网络模型(重点epoll , select 的区别。 实现非阻塞 connect， 使用select)
+
+  
+
+- [ ] tcp的send函数返回一定代表数据从网卡发送出去了么？我说只是发送到了内核缓冲区。又问这个缓冲区也是属于该进程的么？回答是。又继续问，一个数据接收过程发生了几次用户态到内核态的拷贝？
 ##### 2.DSN
 
 - [ ] 说说CDN的架构，缓存的实现, 用户的访问流程，调度是怎么选择机房的
@@ -1875,6 +1930,22 @@
 - [ ] go gc的实现与触发机制
 
 - [ ] go 内存分配
+
+- [x] GC相关
+
+![image-20210312000303854](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312000303854.png)
+
+![image-20210312000338592](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312000338592.png)
+
+![image-20210312000352227](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312000352227.png)
+
+![image-20210312000403454](https://raw.githubusercontent.com/ShadowStorm97/cloudimg/main/image-20210312000403454.png)
+
+
+
+
+
+
 
 #### design
 
